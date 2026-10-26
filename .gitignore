@@ -1,0 +1,62 @@
+# Local only. Not on the remote.
+
+internals/
+.tools/
+
+# Node and locks
+node_modules/
+dist/
+package-lock.json
+
+# Virtualenvs
+.venv/
+venv/
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+.Python
+*.egg-info/
+
+# Test / coverage
+.pytest_cache/
+.coverage
+coverage.xml
+scripts/tests/.work/
+
+# Editors / OS
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+
+# Secrets and local env
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+credentials.json
+secrets.json
+
+# Generated / poly-repo(s)
+.axi_root
+axi-backend/
+
+# Local runs / caches / binaries
+temp/
+.cache/
+wandb/
+mlruns/
+checkpoints/
+*.pt
+*.pth
+*.ckpt
+*.safetensors
+bin/
+jobs/
+
