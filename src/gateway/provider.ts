@@ -694,7 +694,7 @@ export function applyChoice(c: Choice): {
         "  sound      click + message cues",
         "  notify     desktop alert when a reply finishes (if terminal unfocused)",
         "",
-        "slash: /new /web /rename /open /delete [/delete all] /compact /undo /image /status /doctor /spawn /agents /daemon /provider /model /temp /key /sound /notify /arl /harness /refine /codemode /stance /investigate /revise /pivot /evidence /reconcile /ledger /audit /config /steer /turn /factory /mission /decision /mode",
+        "slash: /new /web /rename /open /delete [/delete all] /compact /undo /image /history /status /doctor /spawn /agents /daemon /provider /model /temp /key /sound /notify /arl /harness /refine /codemode /stance /investigate /revise /pivot /evidence /reconcile /ledger /audit /config /steer /turn /factory /mission /decision /mode",
         "",
         "keys: axi provider openai",
         "now: " + activeLabel(),
@@ -759,6 +759,8 @@ export type SlashResult = {
   delete?: true | string
   deleteAll?: boolean
   context?: boolean
+  /** Show input-line history (chat-ui). */
+  history?: boolean
   status?: boolean
   doctor?: boolean
   spawn?: boolean
@@ -928,6 +930,7 @@ export function runSlash(line: string, opts: SlashOpts = {}): SlashResult {
     return { delete: arg || true }
   }
   if (cmd === "/context") return { context: true }
+  if (cmd === "/history") return { history: true }
   if (cmd === "/status") return { status: true }
   if (cmd === "/doctor") return { doctor: true }
   if (cmd === "/spawn") {

@@ -168,6 +168,7 @@ export const SLASH_SPECS: SlashSpec[] = [
   { name: "/undo", hint: "undo last agent turn" },
   { name: "/image", hint: "attach an image by path", aliases: ["/img"] },
   { name: "/context", hint: "context window use" },
+  { name: "/history", hint: "input history · up/down to recall · max 500" },
   { name: "/status", hint: "session snapshot · tokens / cache-hit / ~$" },
   { name: "/doctor", hint: "health check" },
   { name: "/spawn", hint: "worker agents · cancel <id> <why>" },
