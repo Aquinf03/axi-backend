@@ -1,0 +1,24 @@
+#!/usr/bin/env bash
+# Block commits while src/ui is a frontend symlink — only the real directory may be committed.
+set -euo pipefail
+
+ROOT="$(git rev-parse --show-toplevel 2>/dev/null || pwd)"
+UI="$ROOT/src/ui"
+
+if [ -L "$UI" ]; then
+	echo "pre-commit: refusing commit — src/ui is a symlink to the frontend UI." >&2
+	echo "pre-commit: restore the original directory first:" >&2
+	echo "  ./gen.sh ungen yes" >&2
+	exit 1
+fi
+
+while IFS= read -r -d '' path; do
+	mode="$(git ls-files --stage -- "$path" | awk '{print $1; exit}')"
+	if [ "$mode" = "120000" ]; then
+		echo "pre-commit: refusing commit — \`$path\` is staged as a symlink." >&2
+		echo "pre-commit: restore the real directory (./gen.sh ungen yes) before committing." >&2
+		exit 1
+	fi
+done < <(git diff --cached --name-only -z -- src/ui)
+
+exit 0

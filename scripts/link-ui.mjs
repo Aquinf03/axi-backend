@@ -8,6 +8,7 @@
  *
  * Stubs live in scripts/ui-stubs/ and are the committed default under src/ui/.
  */
+import { spawnSync } from "node:child_process"
 import fs from "node:fs"
 import path from "node:path"
 import { fileURLToPath } from "node:url"
@@ -17,6 +18,17 @@ const uiDest = path.join(pkgRoot, "src", "ui")
 const uiBak = path.join(pkgRoot, "src", "ui.bak")
 const distUi = path.join(pkgRoot, "dist", "ui")
 const stubsDir = path.join(pkgRoot, "scripts", "ui-stubs")
+const uiGitState = path.join(pkgRoot, "scripts", "ui-git-state.sh")
+
+function runUiGitState(cmd) {
+  const r = spawnSync("bash", [uiGitState, cmd], { cwd: pkgRoot, encoding: "utf8" })
+  if (r.status !== 0) {
+    const detail = (r.stderr || r.stdout || "").trim()
+    console.warn(`link-ui: ui-git-state ${cmd} failed${detail ? `: ${detail}` : ""}`)
+  } else if (r.stdout?.trim()) {
+    console.log(r.stdout.trim())
+  }
+}
 
 function hasChatUi(dir) {
   return (
@@ -93,6 +105,7 @@ function installStubs() {
       // Refresh from scripts/ui-stubs so edits there win.
       fs.cpSync(stubsDir, uiDest, { recursive: true })
       console.log("link-ui: refreshed UI stubs (standalone)")
+      runUiGitState("unskip")
       return
     }
   } catch {
@@ -102,11 +115,13 @@ function installStubs() {
   fs.mkdirSync(path.dirname(uiDest), { recursive: true })
   fs.cpSync(stubsDir, uiDest, { recursive: true })
   console.log("link-ui: installed UI stubs (standalone)")
+  runUiGitState("unskip")
 }
 
 function linkFrontend(uiSrc) {
   if (alreadyLinkedTo(uiSrc)) {
     console.log(`link-ui: src/ui already → ${uiSrc}`)
+    runUiGitState("skip")
     return
   }
   backupUiDestIfReal()
@@ -114,8 +129,11 @@ function linkFrontend(uiSrc) {
   const rel = path.relative(path.dirname(uiDest), uiSrc)
   fs.symlinkSync(rel, uiDest)
   console.log(`link-ui: linked src/ui → ${rel} (${uiSrc})`)
+  // Hide linked frontend files from git; only the real src/ui dir is committable.
+  runUiGitState("skip")
 }
 
+runUiGitState("install-hooks")
 clearDistUi()
 const frontend = resolveFrontendUi()
 if (frontend) linkFrontend(frontend)
