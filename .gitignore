@@ -47,6 +47,11 @@ secrets.json
 .axi_root
 axi-backend/
 
+# Backups
+*.tmp
+*.bak
+*.swp
+
 # Local runs / caches / binaries
 temp/
 .cache/
