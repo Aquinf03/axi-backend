@@ -14,6 +14,7 @@ import { fileURLToPath } from "node:url"
 
 const pkgRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..")
 const uiDest = path.join(pkgRoot, "src", "ui")
+const uiBak = path.join(pkgRoot, "src", "ui.bak")
 const distUi = path.join(pkgRoot, "dist", "ui")
 const stubsDir = path.join(pkgRoot, "scripts", "ui-stubs")
 
@@ -50,6 +51,23 @@ function removeUiDest() {
     return
   }
   fs.rmSync(uiDest, { recursive: true, force: true })
+}
+
+/** Move a real (non-symlink) src/ui aside before replacing it with a frontend link. */
+function backupUiDestIfReal() {
+  let st
+  try {
+    st = fs.lstatSync(uiDest)
+  } catch {
+    return
+  }
+  if (st.isSymbolicLink()) return
+
+  if (fs.existsSync(uiBak)) {
+    fs.rmSync(uiBak, { recursive: true, force: true })
+  }
+  fs.renameSync(uiDest, uiBak)
+  console.log("link-ui: backed up src/ui → src/ui.bak")
 }
 
 /** Drop compiled UI so mode switches (link ↔ stub) do not leave stale modules. */
@@ -91,6 +109,7 @@ function linkFrontend(uiSrc) {
     console.log(`link-ui: src/ui already → ${uiSrc}`)
     return
   }
+  backupUiDestIfReal()
   removeUiDest()
   const rel = path.relative(path.dirname(uiDest), uiSrc)
   fs.symlinkSync(rel, uiDest)
