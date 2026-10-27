@@ -9,7 +9,13 @@ import { fileURLToPath } from "node:url"
 export function agentRoot(): string {
   let d = path.dirname(fileURLToPath(import.meta.url))
   for (let i = 0; i < 8; i++) {
-    if (existsSync(path.join(d, "package.json")) && existsSync(path.join(d, "bin"))) return d
+    // `bin/` is generated (post_setup); `dist/cli.js` is enough after a build.
+    if (
+      existsSync(path.join(d, "package.json")) &&
+      (existsSync(path.join(d, "bin")) || existsSync(path.join(d, "dist", "cli.js")))
+    ) {
+      return d
+    }
     d = path.dirname(d)
   }
   throw new Error("axi package root not found")
