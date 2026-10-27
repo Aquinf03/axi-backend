@@ -65,9 +65,10 @@ export async function ask(argv: string[]): Promise<void> {
   if (mode) process.env.AXI_PERMISSION_MODE = mode
   if (yes) process.env.AXI_PERMISSION_MODE = "full-access"
   const tools: { name: string; args: string }[] = []
+  const streamed = { value: false }
   try {
     const host = createAskHost(
-      { workspace: train, quiet: json, autoYes: yes },
+      { workspace: train, quiet: json, autoYes: yes, streamed },
       tools,
     )
     const history = withArlDigest([{ role: "user" as const, content: prompt }], {
@@ -106,6 +107,11 @@ export async function ask(argv: string[]): Promise<void> {
     }
     if (json) {
       stdout.write(renderSnapshot(snap, "json"))
+      return
+    }
+    // Tokens already went to stdout via onDelta — don't reprint.
+    if (streamed.value) {
+      if (!text.endsWith("\n")) stdout.write("\n")
       return
     }
     stdout.write(renderMarkdown(snap.toText(), undefined, { baseDir: train }) + "\n")

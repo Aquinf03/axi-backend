@@ -1,6 +1,8 @@
 /** Providers: openai, anthropic, grok, ollama. Keys live in ~/.axi/config.json. */
 
 import { existsSync, mkdirSync, readFileSync } from "node:fs"
+import http from "node:http"
+import https from "node:https"
 import { axiHome } from "../core/home.js"
 import path from "node:path"
 import { stdin, stderr } from "node:process"
@@ -1276,19 +1278,135 @@ async function* sseLines(res: Response): AsyncGenerator<string> {
   const reader = res.body.getReader()
   const dec = new TextDecoder()
   let buf = ""
-  for (;;) {
-    const { done, value } = await reader.read()
-    if (done) break
-    buf += dec.decode(value, { stream: true })
+  try {
     for (;;) {
-      const n = buf.indexOf("\n")
-      if (n < 0) break
-      const line = buf.slice(0, n).replace(/\r$/, "")
-      buf = buf.slice(n + 1)
-      yield line
+      const { done, value } = await reader.read()
+      if (done) break
+      buf += dec.decode(value, { stream: true })
+      for (;;) {
+        const n = buf.indexOf("\n")
+        if (n < 0) break
+        const line = buf.slice(0, n).replace(/\r$/, "")
+        buf = buf.slice(n + 1)
+        yield line
+      }
     }
+  } finally {
+    // Flush any complete lines already buffered when the body aborts/errors.
+    if (buf.trim()) yield buf.replace(/\r$/, "")
   }
-  if (buf.trim()) yield buf.replace(/\r$/, "")
+}
+
+/**
+ * Stream OpenAI-compat SSE via node:http — undici's global fetch applies
+ * headersTimeout/bodyTimeout that abort slow local model streams mid-read
+ * with "The operation was aborted due to timeout" even while tokens arrive.
+ */
+function streamOpenAiCompatSse(
+  endpoint: string,
+  body: unknown,
+  headers: Record<string, string>,
+  signal: AbortSignal | undefined,
+  onLine: (line: string) => void,
+): Promise<{ status: number; errorText: string }> {
+  return new Promise((resolve, reject) => {
+    let settled = false
+    const finish = (fn: () => void) => {
+      if (settled) return
+      settled = true
+      fn()
+    }
+    let url: URL
+    try {
+      url = new URL(endpoint)
+    } catch (err) {
+      reject(err)
+      return
+    }
+    const lib = url.protocol === "https:" ? https : http
+    const payload = Buffer.from(JSON.stringify(body))
+    const req = lib.request(
+      {
+        protocol: url.protocol,
+        hostname: url.hostname,
+        port: url.port || (url.protocol === "https:" ? 443 : 80),
+        path: `${url.pathname}${url.search}`,
+        method: "POST",
+        headers: {
+          ...headers,
+          "content-type": "application/json",
+          "content-length": String(payload.length),
+          accept: "text/event-stream",
+        },
+        // Local models can sit on prefill for a long time; never idle-kill the socket.
+        timeout: 0,
+      },
+      (res) => {
+        const status = res.statusCode ?? 0
+        if (status < 200 || status >= 300) {
+          const chunks: Buffer[] = []
+          res.on("data", (c) => chunks.push(c as Buffer))
+          res.on("end", () =>
+            finish(() =>
+              resolve({ status, errorText: Buffer.concat(chunks).toString("utf8") }),
+            ),
+          )
+          res.on("error", (err) => finish(() => reject(err)))
+          return
+        }
+        const dec = new TextDecoder()
+        let buf = ""
+        const takeLines = (final = false) => {
+          for (;;) {
+            const n = buf.indexOf("\n")
+            if (n < 0) break
+            const line = buf.slice(0, n).replace(/\r$/, "")
+            buf = buf.slice(n + 1)
+            onLine(line)
+          }
+          if (final && buf.trim()) {
+            onLine(buf.replace(/\r$/, ""))
+            buf = ""
+          }
+        }
+        const safeTake = (final = false) => {
+          try {
+            takeLines(final)
+          } catch (err) {
+            res.destroy()
+            finish(() => reject(err))
+          }
+        }
+        res.on("data", (chunk: Buffer | string) => {
+          buf += typeof chunk === "string" ? chunk : dec.decode(chunk, { stream: true })
+          safeTake()
+        })
+        res.on("end", () => {
+          buf += dec.decode()
+          safeTake(true)
+          finish(() => resolve({ status, errorText: "" }))
+        })
+        res.on("error", (err) => finish(() => reject(err)))
+      },
+    )
+    req.on("error", (err) => finish(() => reject(err)))
+    req.on("timeout", () => {
+      req.destroy(new Error("socket timeout"))
+    })
+    if (signal) {
+      if (signal.aborted) {
+        req.destroy(new Error(String(signal.reason ?? "aborted")))
+        return
+      }
+      const onAbort = () => {
+        req.destroy(signal.reason instanceof Error ? signal.reason : new Error(String(signal.reason ?? "aborted")))
+      }
+      signal.addEventListener("abort", onAbort, { once: true })
+      req.on("close", () => signal.removeEventListener("abort", onAbort))
+    }
+    req.write(payload)
+    req.end()
+  })
 }
 
 function openaiDelta(line: string): string | null {
@@ -1527,6 +1645,9 @@ function nativeWebSearch(id: ProviderId): boolean {
 }
 
 function clientTools(id: ProviderId, tools: AgentToolJson[]): AgentToolJson[] {
+  // Ollama's OpenAI-compat endpoint hangs (0 bytes → AbortSignal timeout) when tool
+  // schemas are attached. Chat-only until that path is solid.
+  if (id === "ollama") return []
   if (!nativeWebSearch(id)) return tools
   return tools.filter((t) => t.name !== "web_search")
 }
@@ -1799,69 +1920,64 @@ export async function streamTurn(
     )
   }
 
-  const res = await fetch(`${base}/chat/completions`, {
-    method: "POST",
-    headers: {
-      "content-type": "application/json",
-      authorization: `Bearer ${key}`,
-    },
-    body: JSON.stringify({
-      model,
-      stream: true,
-      stream_options: { include_usage: true },
-      messages: openaiMessages(system, hist),
-      ...temperatureBody(),
-      ...(fns.length ? { tools: openaiTools(fns) } : {}),
-    }),
-    signal: streamSignal(120_000, opts.signal),
-  })
-  if (!res.ok) {
-    const body = (await res.json().catch(() => ({}))) as { error?: { message?: string } }
-    throw new Error(body.error?.message ?? `${id} ${res.status}`)
-  }
+  // Ollama: chat-only over node:http SSE. Global fetch (undici) aborts slow local
+  // streams via headersTimeout/bodyTimeout → "operation was aborted due to timeout"
+  // while the model is still producing tokens the UI never sees.
   let text = ""
-  const calls: { id: string; name: string; args: string }[] = []
   let usage: TokenUsageOut | undefined
-  for await (const line of sseLines(res)) {
-    if (!line.startsWith("data:")) continue
+  const handleLine = (line: string) => {
+    if (!line.startsWith("data:")) return
     const raw = line.slice(5).trim()
-    if (!raw || raw === "[DONE]") continue
+    if (!raw || raw === "[DONE]") return
     let j: {
-      choices?: {
-        delta?: {
-          content?: string
-          tool_calls?: { index?: number; id?: string; function?: { name?: string; arguments?: string } }[]
-        }
-      }[]
+      choices?: { delta?: { content?: string | null } }[]
       usage?: unknown
       error?: { message?: string }
     }
     try {
       j = JSON.parse(raw) as typeof j
     } catch {
-      continue
+      return
     }
     if (j.error?.message) throw new Error(j.error.message)
-    const delta = j.choices?.[0]?.delta
-    if (delta?.content) {
-      text += delta.content
-      onDelta(delta.content)
-    }
-    for (const tc of delta?.tool_calls ?? []) {
-      const i = tc.index ?? 0
-      while (calls.length <= i) calls.push({ id: "", name: "", args: "" })
-      const row = calls[i]!
-      if (tc.id) row.id = tc.id
-      if (tc.function?.name) row.name = tc.function.name
-      if (tc.function?.arguments) row.args += tc.function.arguments
+    const chunk = j.choices?.[0]?.delta?.content
+    if (chunk) {
+      text += chunk
+      onDelta(chunk)
     }
     if (j.usage) usage = parseProviderUsage(j.usage) ?? usage
   }
-  const toolCalls = calls
-    .filter((c) => c.name)
-    .map((c, i) => ({ ...c, id: c.id || `call_${i}` }))
-  if (!text && !toolCalls.length) throw new Error("empty reply")
-  return { text, toolCalls, usage }
+  let result: { status: number; errorText: string }
+  try {
+    result = await streamOpenAiCompatSse(
+      `${base}/chat/completions`,
+      {
+        model,
+        stream: true,
+        messages: openaiMessages(system, hist),
+        ...temperatureBody(),
+      },
+      { authorization: `Bearer ${key}` },
+      opts.signal,
+      handleLine,
+    )
+  } catch (err) {
+    // Keep whatever tokens we already forwarded to the UI.
+    if (text) return { text, toolCalls: [], usage }
+    throw err
+  }
+  if (result.status < 200 || result.status >= 300) {
+    let msg = `${id} ${result.status}`
+    try {
+      const body = JSON.parse(result.errorText) as { error?: { message?: string } }
+      if (body.error?.message) msg = body.error.message
+    } catch {
+      if (result.errorText.trim()) msg = result.errorText.trim().slice(0, 400)
+    }
+    throw new Error(msg)
+  }
+  if (!text) throw new Error("empty reply")
+  return { text, toolCalls: [], usage }
 }
 
 export async function streamChat(

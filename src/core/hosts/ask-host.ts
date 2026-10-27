@@ -1,7 +1,7 @@
-/** One-shot `axi ask` host — stderr for tools/permits, no streaming deltas. */
+/** One-shot `axi ask` host — stderr for tools/permits, stdout for live tokens. */
 
 import { createInterface } from "node:readline"
-import { stdin, stderr } from "node:process"
+import { stdin, stdout, stderr } from "node:process"
 import type { AgentHost } from "../agent/host.js"
 import { clipToolLog, formatPermitDisplay } from "../tooling.js"
 import type { PermitChoice } from "../permissions.js"
@@ -16,6 +16,8 @@ export type AskHostOptions = {
   quiet?: boolean
   /** Auto-approve permits (e.g. -y / full-access for this ask). */
   autoYes?: boolean
+  /** Set true when any assistant token was written to stdout. */
+  streamed?: { value: boolean }
 }
 
 function askPermit(cmd: string): Promise<PermitChoice> {
@@ -48,10 +50,15 @@ export function createAskHost(
 ): AgentHost {
   const quiet = opts.quiet === true
   const env = opts.env ?? createNativeHost(opts.workspace)
+  const streamed = opts.streamed
   return {
     workspace: env.workspaceRoot,
     env,
-    onDelta: () => {},
+    onDelta: (chunk) => {
+      if (quiet || !chunk) return
+      if (streamed) streamed.value = true
+      stdout.write(chunk)
+    },
     onToolStart: (name, args) => {
       tools.push({ name, args: args ?? "" })
       if (!quiet) stderr.write(`${name}\n`)
