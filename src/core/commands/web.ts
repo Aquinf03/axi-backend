@@ -2,6 +2,7 @@
 
 import { spawn, spawnSync, type ChildProcess } from "node:child_process"
 import { existsSync } from "node:fs"
+import http from "node:http"
 import { createServer } from "node:net"
 import path from "node:path"
 import { stdout, stderr } from "node:process"
@@ -9,6 +10,8 @@ import { agentRoot } from "../root.js"
 import { createNativeHost } from "../hosts/native.js"
 
 const DEFAULT_PORT = 3000
+/** Match the URL we open — avoids IPv6/hostname mismatch with Firefox HMR. */
+const LISTEN_HOST = "127.0.0.1"
 
 /** Web servers started for an axi TTY session — stopped when that session exits. */
 const sessionOwned = new Map<number, { port: number; child: ChildProcess }>()
@@ -36,7 +39,7 @@ function portFree(port: number): Promise<boolean> {
     s.once("listening", () => {
       s.close(() => resolve(true))
     })
-    s.listen(port, "127.0.0.1")
+    s.listen(port, LISTEN_HOST)
   })
 }
 
@@ -52,6 +55,67 @@ async function waitHttp(url: string, ms: number): Promise<boolean> {
     await new Promise((r) => setTimeout(r, 350))
   }
   return false
+}
+
+/** Probe Next HMR upgrade so the browser is not opened before the socket is ready. */
+function probeHmr(baseUrl: string, timeoutMs = 1500): Promise<boolean> {
+  return new Promise((resolve) => {
+    let settled = false
+    const done = (ok: boolean) => {
+      if (settled) return
+      settled = true
+      resolve(ok)
+    }
+    let u: URL
+    try {
+      u = new URL(baseUrl)
+    } catch {
+      done(false)
+      return
+    }
+    const req = http.request({
+      hostname: u.hostname,
+      port: u.port || 80,
+      path: "/_next/hmr?id=axi-ready",
+      headers: {
+        Connection: "Upgrade",
+        Upgrade: "websocket",
+        "Sec-WebSocket-Key": "dGhlIHNhbXBsZSBub25jZQ==",
+        "Sec-WebSocket-Version": "13",
+      },
+    })
+    req.setTimeout(timeoutMs, () => {
+      req.destroy()
+      done(false)
+    })
+    req.once("upgrade", (_res, socket) => {
+      socket.destroy()
+      done(true)
+    })
+    req.once("response", (res) => {
+      res.resume()
+      done(false)
+    })
+    req.once("error", () => done(false))
+    req.end()
+  })
+}
+
+async function waitHmr(url: string, ms: number): Promise<boolean> {
+  const start = Date.now()
+  while (Date.now() - start < ms) {
+    if (await probeHmr(url)) return true
+    await new Promise((r) => setTimeout(r, 250))
+  }
+  return false
+}
+
+/** HTTP up + HMR upgrade accepting — ready for the browser. */
+async function waitReady(url: string, ms: number): Promise<boolean> {
+  const start = Date.now()
+  if (!(await waitHttp(url, ms))) return false
+  const left = Math.max(2_000, ms - (Date.now() - start))
+  return waitHmr(url, left)
 }
 
 function webDir(): string {
@@ -177,7 +241,8 @@ function startNext(opts: {
     PORT: String(opts.port),
   }
   const bin = nextBin(opts.dir)
-  const args = ["dev", "-p", String(opts.port)]
+  // Pin hostname to the same host we open in the browser (HMR WebSocket).
+  const args = ["dev", "-H", LISTEN_HOST, "-p", String(opts.port)]
   const sessionOrOrphan = opts.mode === "session" || opts.mode === "orphan"
   const child = spawn(bin, args, {
     cwd: opts.dir,
@@ -233,14 +298,14 @@ export async function launchWeb(opts: {
     const child = startNext({ dir, port, workspace, mode: ownership })
     pid = child.pid
     started = true
-    const ok = await waitHttp(url, opts.waitMs ?? 90_000)
+    const ok = await waitReady(url, opts.waitMs ?? 90_000)
     if (!ok) {
       if (pid) killWebProcess(pid)
       sessionOwned.delete(pid ?? -1)
       throw new Error(`web UI did not become ready at ${url}`)
     }
   } else {
-    const ok = await waitHttp(url, 3_000)
+    const ok = await waitReady(url, 5_000)
     if (!ok) alreadyRunning = false
   }
 
@@ -307,7 +372,7 @@ export async function webCmd(argv: string[]): Promise<void> {
 
     const opened = { done: false }
     void (async () => {
-      const ok = await waitHttp(url, 90_000)
+      const ok = await waitReady(url, 90_000)
       if (!ok || opened.done) return
       opened.done = true
       if (!noOpen.present) {
