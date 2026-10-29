@@ -102,22 +102,23 @@ export async function runline(argv: string[]): Promise<void> {
 
   try {
     if (isSlashLine(prompt)) {
-      const { kick } = await runSlashCli(prompt, {
+      const slash = await runSlashCli(prompt, {
         workspace,
         sessionId: spec.id,
         history,
         spec,
       })
-      if (kick) {
+      if (slash.text) stdout.write(slash.text.endsWith("\n") ? slash.text : `${slash.text}\n`)
+      if (slash.kick) {
         const { reply, streamed } = await runAgentOnce({
           workspace,
           sessionId: spec.id,
-          prompt: kick,
+          prompt: slash.kick,
           history,
         })
         saveChat(workspace, spec, history)
         try {
-          await nameChat(workspace, spec, kick, reply, history)
+          await nameChat(workspace, spec, slash.kick, reply, history)
         } catch {
           /* best-effort */
         }

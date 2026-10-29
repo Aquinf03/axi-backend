@@ -1,9 +1,8 @@
 /**
- * Apply a slash command in headless CLI (axi runline).
- * Same runSlash contract as TTY chat; side-effects that need a host run here.
+ * Apply a slash command headlessly (axi runline / web bridge).
+ * Same runSlash contract as TTY chat; returns text instead of painting the TUI.
  */
 
-import { stdout, stderr } from "node:process"
 import {
   activeId,
   activeLabel,
@@ -44,13 +43,10 @@ export type SlashCliOpts = {
   spec: ChatSpec
 }
 
-function out(text: string): void {
-  const t = text.endsWith("\n") ? text : text + "\n"
-  stdout.write(t)
-}
-
-function err(text: string): void {
-  stderr.write(text.endsWith("\n") ? text : text + "\n")
+export type SlashCliResult = {
+  text: string
+  /** Follow-up user message — caller should run one agent turn. */
+  kick?: string
 }
 
 function statusText(workspace: string, spec: ChatSpec, history: ChatMsg[]): string {
@@ -79,7 +75,7 @@ function statusText(workspace: string, spec: ChatSpec, history: ChatMsg[]): stri
   ].join("\n")
 }
 
-async function applyWeb(r: SlashResult, workspace: string): Promise<void> {
+async function applyWeb(r: SlashResult, workspace: string): Promise<string> {
   const {
     getWebPort,
     launchWeb,
@@ -90,32 +86,24 @@ async function applyWeb(r: SlashResult, workspace: string): Promise<void> {
     webStatusText,
   } = await import("./web.js")
   if (r.web === "status") {
-    out(webStatusText(await webRuntimeStatusAsync()))
-    return
+    return webStatusText(await webRuntimeStatusAsync())
   }
   if (r.web === "off") {
     const before = await webRuntimeStatusAsync()
-    if (!before.running) {
-      out(webStatusText(before))
-      return
-    }
+    if (!before.running) return webStatusText(before)
     if (!before.sessionOwned) {
-      out(
-        `${webStatusText(before)}\nweb UI  not owned by this session — stop the process on :${before.port} yourself`,
-      )
-      return
+      return `${webStatusText(before)}\nweb UI  not owned by this session — stop the process on :${before.port} yourself`
     }
     stopSessionOwnedWeb()
-    out(webStatusText(runtimeStatus()))
-    return
+    return webStatusText(runtimeStatus())
   }
+  const lines: string[] = []
   if (r.webPort != null) {
     try {
       const saved = setWebPort(r.webPort)
-      if (saved.includes("\n\n")) out(saved)
+      if (saved.includes("\n\n")) lines.push(saved)
     } catch (e) {
-      err(`web UI  ${e instanceof Error ? e.message : String(e)}`)
-      return
+      return `web UI  ${e instanceof Error ? e.message : String(e)}`
     }
     const before = runtimeStatus()
     if (before.sessionOwned && before.port !== r.webPort) stopSessionOwnedWeb()
@@ -128,41 +116,53 @@ async function applyWeb(r: SlashResult, workspace: string): Promise<void> {
       ownership: "session",
     })
     const port = Number(new URL(launched.url).port) || r.webPort || getWebPort()
-    out(
+    lines.push(
       launched.alreadyRunning
         ? `${webStatusText({ running: true, sessionOwned: false, port, url: launched.url })} (not owned by this session)`
         : `${webStatusText({ running: true, sessionOwned: true, port, url: launched.url })} · holding until ctrl+c`,
     )
   } catch (e) {
-    err(`web UI  ${e instanceof Error ? e.message : String(e)}`)
+    return `web UI  ${e instanceof Error ? e.message : String(e)}`
   }
+  return lines.join("\n")
 }
 
 /**
- * Run one slash line. Returns a follow-up user message when the slash kicks a turn
- * (e.g. /mission continuation) — caller should run the agent loop once with it.
+ * Run one slash line. Returns reply text (+ optional kick for a follow-up agent turn).
  */
-export async function runSlashCli(line: string, opts: SlashCliOpts): Promise<{ kick?: string }> {
+export async function runSlashCli(line: string, opts: SlashCliOpts): Promise<SlashCliResult> {
   const { workspace, sessionId, history, spec } = opts
   const host = createNativeHost(workspace)
   const r = runSlash(line, { workspace, sessionId })
+  const lines: string[] = []
+  const push = (t: string) => {
+    const s = t.replace(/\n+$/, "")
+    if (s) lines.push(s)
+  }
+  const done = (kick?: string): SlashCliResult => ({
+    text: lines.join("\n"),
+    ...(kick ? { kick } : {}),
+  })
 
-  if (r.quit) return {}
+  if (r.quit) {
+    push("exit")
+    return done()
+  }
 
   if (r.openUrl) {
     const href = normalizeOpenUrl(r.openUrl)
     if (!href) {
-      out("usage: /url <host|http(s)|file|mailto>  (bare hosts get https://)")
-      return {}
+      push("usage: /url <host|http(s)|file|mailto>  (bare hosts get https://)")
+      return done()
     }
     const ok = await host.openUrl(href)
-    out(ok ? `opened  ${href}` : `could not open  ${href}`)
-    return {}
+    push(ok ? `opened  ${href}` : `could not open  ${href}`)
+    return done()
   }
 
   if (r.web) {
-    await applyWeb(r, workspace)
-    return {}
+    push(await applyWeb(r, workspace))
+    return done()
   }
 
   if (r.copy !== undefined) {
@@ -177,22 +177,20 @@ export async function runSlashCli(line: string, opts: SlashCliOpts): Promise<{ k
       }
     }
     if (!text.trim()) {
-      out("nothing to copy")
-      return {}
+      push("nothing to copy")
+      return done()
     }
     const ok = await host.writeClipboard(text)
-    out(ok ? `copied  ${text.length} chars` : "clipboard unavailable")
-    return {}
+    push(ok ? `copied  ${text.length} chars` : "clipboard unavailable")
+    return done()
   }
 
   if (r.refine) {
     try {
       if (r.refine.deployApprove) {
-        const result = await approvePendingDeploy("user")
-        out(formatRefinementNotice(result))
+        push(formatRefinementNotice(await approvePendingDeploy("user")))
       } else if (r.refine.rollbackId) {
-        const result = await runRefineRollback(r.refine.rollbackId, sessionId, "user")
-        out(formatRefinementNotice(result))
+        push(formatRefinementNotice(await runRefineRollback(r.refine.rollbackId, sessionId, "user")))
       } else {
         const refined = await runRefine({
           history,
@@ -203,98 +201,98 @@ export async function runSlashCli(line: string, opts: SlashCliOpts): Promise<{ k
           source: "user",
         })
         if (refined.kind === "pending_deploy") {
-          out(refined.diff)
-          out('staged — approve with: axi runline "/refine deploy approve"')
+          push(refined.diff)
+          push('staged — approve with: axi runline "/refine deploy approve"')
         } else {
-          out(formatRefinementNotice(refined.result))
+          push(formatRefinementNotice(refined.result))
         }
       }
     } catch (e) {
-      err(e instanceof Error ? e.message : String(e))
+      push(e instanceof Error ? e.message : String(e))
     }
-    return {}
+    return done()
   }
 
   if (r.undo) {
-    out("undo  nothing to undo in runline (single turn)")
-    return {}
+    push("undo  nothing to undo here (no prior turn in this request)")
+    return done()
   }
 
   if (r.newChat || r.rename || r.open || r.delete || r.deleteAll) {
-    out("chat navigation is TTY-only — use axi chat / axi")
-    return {}
+    push("chat navigation is TTY-only — use axi chat / axi")
+    return done()
   }
 
   if (r.chats) {
     const all = listChats(workspace)
-    out(
+    push(
       all.length
         ? all.map((c) => `${c.id === spec.id ? "*" : " "} ${c.id}  ${c.name}`).join("\n")
         : "no chats",
     )
-    return {}
+    return done()
   }
 
   if (r.context) {
     const snap = measureContext(workspace, history, contextWindow())
     const parts = snap.parts.map((p) => `  ${p.label.padEnd(8)}  ${p.tokens}`).join("\n")
-    out(`${snap.line}\n${parts}`)
-    return {}
+    push(`${snap.line}\n${parts}`)
+    return done()
   }
 
   if (r.history) {
-    out("history empty  (runline has no input-line history)")
-    return {}
+    push("history empty  (no input-line history in this surface)")
+    return done()
   }
 
   if (r.status) {
-    out(statusText(workspace, spec, history))
-    return {}
+    push(statusText(workspace, spec, history))
+    return done()
   }
 
   if (r.doctor) {
     const { checks } = await runDoctor(workspace)
-    out(formatDoctor(checks))
-    return {}
+    push(formatDoctor(checks))
+    return done()
   }
 
   if (r.spawn) {
-    out(formatAgents(workspace, sessionId))
-    return {}
+    push(formatAgents(workspace, sessionId))
+    return done()
   }
 
   if (r.agentsView) {
-    out(formatAgentsRoster(workspace, sessionId))
-    return {}
+    push(formatAgentsRoster(workspace, sessionId))
+    return done()
   }
 
   if (r.arlView) {
-    out("arl browse is TTY-only — use /arl list [query] or axi")
-    return {}
+    push("arl browse is TTY-only — use /arl list [query] or axi")
+    return done()
   }
 
   if (r.spawnList) {
-    out(formatAgents(workspace, sessionId))
-    return {}
+    push(formatAgents(workspace, sessionId))
+    return done()
   }
 
   if (r.spawnRun) {
     try {
       const a = await startAgent(workspace, r.spawnRun, { parentId: sessionId })
-      out(`spawned  ${a.id}  ${a.status}  ${a.name}`)
+      push(`spawned  ${a.id}  ${a.status}  ${a.name}`)
     } catch (e) {
-      err(e instanceof Error ? e.message : String(e))
+      push(e instanceof Error ? e.message : String(e))
     }
-    return {}
+    return done()
   }
 
   if (r.spawnLog) {
     try {
-      out(agentLog(workspace, r.spawnLog))
+      push(agentLog(workspace, r.spawnLog))
     } catch (e) {
-      err(e instanceof Error ? e.message : String(e))
+      push(e instanceof Error ? e.message : String(e))
     }
-    return {}
+    return done()
   }
 
   if (r.spawnCancel) {
@@ -303,16 +301,16 @@ export async function runSlashCli(line: string, opts: SlashCliOpts): Promise<{ k
         why: r.spawnCancelWhy || "canceled via /spawn cancel",
         sessionId,
       })
-      out(`canceled  ${a.id}  ${a.status}\n${a.receipt.text}`)
+      push(`canceled  ${a.id}  ${a.status}\n${a.receipt.text}`)
     } catch (e) {
-      err(e instanceof Error ? e.message : String(e))
+      push(e instanceof Error ? e.message : String(e))
     }
-    return {}
+    return done()
   }
 
   if (r.openKey || r.promptKey) {
-    out("paste keys via: axi provider <name>")
-    return {}
+    push("paste keys via: axi provider <name>")
+    return done()
   }
 
   if (r.factoryStart) {
@@ -322,38 +320,37 @@ export async function runSlashCli(line: string, opts: SlashCliOpts): Promise<{ k
         workspace,
         machine: r.factoryStart,
       })
-      out(formatFactoryStatus(state))
+      push(formatFactoryStatus(state))
     } catch (e) {
-      err(`factory failed  ${e instanceof Error ? e.message : String(e)}`)
+      push(`factory failed  ${e instanceof Error ? e.message : String(e)}`)
     }
-    return {}
+    return done()
   }
 
   if (r.decisionDecide) {
     try {
-      const ans = await decide(r.decisionDecide)
-      out(formatDecideAnswer(ans))
+      push(formatDecideAnswer(await decide(r.decisionDecide)))
     } catch (e) {
-      err(`decision failed  ${e instanceof Error ? e.message : String(e)}`)
+      push(`decision failed  ${e instanceof Error ? e.message : String(e)}`)
     }
-    return {}
+    return done()
   }
 
   if (r.compact) {
-    out("compact needs chat history — use axi chat")
-    return {}
+    push("compact needs a full TTY chat session — use axi")
+    return done()
   }
 
   if (r.image) {
-    out("image attach is TTY-only — use axi chat · /image")
-    return {}
+    push("image attach is TTY-only — use axi chat · /image")
+    return done()
   }
 
-  if (r.text) out(r.text)
+  if (r.text) push(r.text)
 
-  if (r.missionKick) return { kick: r.missionKick }
+  if (r.missionKick) return done(r.missionKick)
 
-  return {}
+  return done()
 }
 
 export function isSlashLine(line: string): boolean {
