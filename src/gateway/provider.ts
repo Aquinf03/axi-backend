@@ -90,6 +90,8 @@ type Config = {
   notify?: boolean
   /** Sampling temperature for agent turns. Omitted → provider default. */
   temperature?: number
+  /** Browser UI listen port (`/web <port>` / `axi web --port`). Omitted → 3000. */
+  web_port?: number
   providers: Partial<Record<ProviderId, Saved>>
 }
 
@@ -142,7 +144,7 @@ function save(cfg: Config): { staged?: string } {
     body,
     label: "config.json",
     mode: 0o600,
-    summary: "provider keys / active model / sound / notify",
+    summary: "provider keys / active model / sound / notify / web_port",
   })
   if (result.kind === "staged") return { staged: result.diff }
   return {}
@@ -696,7 +698,7 @@ export function applyChoice(c: Choice): {
         "  sound      click + message cues",
         "  notify     desktop alert when a reply finishes (if terminal unfocused)",
         "",
-        "slash: /new /web /rename /open /delete [/delete all] /compact /undo /image /history /status /doctor /spawn /agents /daemon /provider /model /temp /key /sound /notify /arl /harness /refine /codemode /stance /investigate /revise /pivot /evidence /reconcile /ledger /audit /config /steer /turn /factory /mission /decision /mode",
+        "slash: /new /web [on|off|status|<port>] /rename /open /delete [/delete all] /compact /undo /image /history /status /doctor /spawn /agents /daemon /provider /model /temp /key /sound /notify /arl /harness /refine /codemode /stance /investigate /revise /pivot /evidence /reconcile /ledger /audit /config /steer /turn /factory /mission /decision /mode",
         "",
         "keys: axi provider openai",
         "now: " + activeLabel(),
@@ -754,8 +756,10 @@ export type SlashResult = {
   open?: string
   /** Open via injected HostEnv.openUrl (not process spawn in core). */
   openUrl?: string
-  /** Launch browser web UI (chat-ui starts Next if needed). */
-  web?: boolean
+  /** Browser web UI control (chat-ui starts/stops Next). */
+  web?: "on" | "off" | "status"
+  /** When set with web "on", persist + start on this port. */
+  webPort?: number
   /** Copy last assistant reply, or explicit text, via HostEnv.writeClipboard. */
   copy?: true | string
   delete?: true | string
@@ -999,8 +1003,21 @@ export function runSlash(line: string, opts: SlashOpts = {}): SlashResult {
     return { openUrl: arg }
   }
   if (cmd === "/web") {
-    // Handled in chat-ui (async launch); keep a sync fallback text.
-    return { web: true, text: "opening web UI…" }
+    const head = arg.trim().split(/\s+/).filter(Boolean)[0]?.toLowerCase() ?? ""
+    if (!head || head === "on") {
+      // Handled in chat-ui (async launch).
+      return { web: "on", text: "web UI  starting…" }
+    }
+    if (head === "off") return { web: "off", text: "web UI  stopping…" }
+    if (head === "status") return { web: "status" }
+    if (/^\d+$/.test(head)) {
+      const port = Number(head)
+      if (!Number.isFinite(port) || port <= 0 || port > 65535) {
+        return { text: "usage: /web on|off|status|<port>" }
+      }
+      return { web: "on", webPort: Math.floor(port), text: `web UI  :${port}…` }
+    }
+    return { text: "usage: /web on|off|status|<port>" }
   }
   if (cmd === "/copy") {
     return { copy: arg || true }

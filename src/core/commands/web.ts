@@ -1,20 +1,113 @@
 /** `axi web` — install/start the Next.js shell and open it. */
 
 import { spawn, spawnSync, type ChildProcess } from "node:child_process"
-import { existsSync } from "node:fs"
+import { existsSync, mkdirSync, readFileSync } from "node:fs"
 import http from "node:http"
 import { createServer } from "node:net"
 import path from "node:path"
 import { stdout, stderr } from "node:process"
+import { axiHome } from "../home.js"
+import { proposeConfigWrite } from "../config/pending.js"
 import { agentRoot } from "../root.js"
 import { createNativeHost } from "../hosts/native.js"
 
-const DEFAULT_PORT = 3000
+export const DEFAULT_WEB_PORT = 3000
 /** Match the URL we open — avoids IPv6/hostname mismatch with Firefox HMR. */
 const LISTEN_HOST = "127.0.0.1"
 
 /** Web servers started for an axi TTY session — stopped when that session exits. */
 const sessionOwned = new Map<number, { port: number; child: ChildProcess }>()
+
+function configPath(): string {
+  return path.join(axiHome(), "config.json")
+}
+
+type ConfigFile = {
+  web_port?: number
+  [key: string]: unknown
+}
+
+function loadConfigFile(): ConfigFile {
+  const p = configPath()
+  if (!existsSync(p)) return {}
+  try {
+    const j = JSON.parse(readFileSync(p, "utf8")) as ConfigFile
+    if (!j || typeof j !== "object") return {}
+    return j
+  } catch {
+    return {}
+  }
+}
+
+/** Configured listen port (`~/.axi/config.json` → `web_port`). */
+export function getWebPort(): number {
+  const n = loadConfigFile().web_port
+  if (typeof n === "number" && Number.isFinite(n) && n > 0) return Math.floor(n)
+  return DEFAULT_WEB_PORT
+}
+
+/** Persist listen port; returns status text (may include staged config diff). */
+export function setWebPort(port: number): string {
+  const n = Math.floor(port)
+  if (!Number.isFinite(n) || n <= 0) throw new Error(`invalid web port: ${port}`)
+  const cfg = loadConfigFile()
+  cfg.web_port = n
+  mkdirSync(axiHome(), { recursive: true, mode: 0o700 })
+  const body = JSON.stringify(cfg, null, 2) + "\n"
+  const result = proposeConfigWrite({
+    path: configPath(),
+    body,
+    label: "config.json",
+    mode: 0o600,
+    summary: `web_port → ${n}`,
+  })
+  if (result.kind === "staged") return `web port  ${n}\n\n${result.diff}`
+  return `web port  ${n}`
+}
+
+export type WebRuntimeStatus = {
+  running: boolean
+  sessionOwned: boolean
+  port: number
+  url: string
+}
+
+/** Live status for the configured (or session-owned) web UI. */
+export function webRuntimeStatus(): WebRuntimeStatus {
+  for (const entry of sessionOwned.values()) {
+    const port = entry.port
+    return {
+      running: true,
+      sessionOwned: true,
+      port,
+      url: `http://127.0.0.1:${port}`,
+    }
+  }
+  const port = getWebPort()
+  const url = `http://127.0.0.1:${port}`
+  return { running: false, sessionOwned: false, port, url }
+}
+
+/** Async status: also probes whether something answers on the configured port. */
+export async function webRuntimeStatusAsync(): Promise<WebRuntimeStatus> {
+  const base = webRuntimeStatus()
+  if (base.running) return base
+  const free = await portFree(base.port)
+  if (!free) {
+    return { ...base, running: true, sessionOwned: false }
+  }
+  return base
+}
+
+export function webStatusText(status: WebRuntimeStatus = webRuntimeStatus()): string {
+  const state = status.running ? "on" : "off"
+  const owned = status.running
+    ? status.sessionOwned
+      ? " · session"
+      : " · external"
+    : ""
+  return `web  ${state} · :${status.port} · ${status.url}${owned}`
+}
 
 function takeFlag(argv: string[], name: string): { argv: string[]; present: boolean } {
   const i = argv.indexOf(name)
@@ -279,7 +372,7 @@ export async function launchWeb(opts: {
   detach?: boolean
   waitMs?: number
 }): Promise<LaunchWebResult> {
-  const port = opts.port && opts.port > 0 ? opts.port : DEFAULT_PORT
+  const port = opts.port && opts.port > 0 ? opts.port : getWebPort()
   const workspace = path.resolve(opts.workspace?.trim() || process.cwd())
   const url = `http://127.0.0.1:${port}`
   const dir = ensureWebTree()
@@ -326,11 +419,18 @@ export async function webCmd(argv: string[]): Promise<void> {
   rest = detach.argv
   const portOpt = takeOpt(rest, "--port")
   rest = portOpt.argv
-  const port = portOpt.value ? Number(portOpt.value) : DEFAULT_PORT
+  const port = portOpt.value ? Number(portOpt.value) : getWebPort()
   if (!Number.isFinite(port) || port <= 0) {
     stderr.write("usage: axi web [--port N] [--no-open] [--detach] [dir]\n")
     process.exitCode = 1
     return
+  }
+  if (portOpt.value) {
+    try {
+      setWebPort(port)
+    } catch {
+      /* ignore — still start on the requested port */
+    }
   }
 
   const workspace = rest[0] && !rest[0].startsWith("-") ? path.resolve(rest[0]) : process.cwd()

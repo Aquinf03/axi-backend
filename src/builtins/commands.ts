@@ -147,16 +147,20 @@ export const CLI_SPECS: CliSpec[] = [
     summary: "browser UI (Next.js → local runTurn)",
     details: [
       "axi web             build if needed, npm i web/, next dev, open browser",
-      "axi web --port 3001 alternate port",
+      "axi web --port 3001 set ~/.axi web_port + listen there",
       "axi web --detach    background Next, print URL",
       "axi web --no-open   start without opening a browser",
+      "/web · /web on      start (session-owned; stops when chat exits)",
+      "/web off            stop session-owned web UI",
+      "/web status         on/off · port · url",
+      "/web <port>         save web_port + start on that port",
     ],
   },
 ]
 
 export const SLASH_SPECS: SlashSpec[] = [
   { name: "/help", hint: "commands" },
-  { name: "/web", hint: "open browser UI · stops when this chat exits" },
+  { name: "/web", hint: "on · off · status · <port> · stops when this chat exits" },
   { name: "/new", hint: "start a new chat", aliases: ["/newchat"] },
   { name: "/rename", hint: "rename this chat", aliases: ["/name"] },
   { name: "/chats", hint: "list chats" },
