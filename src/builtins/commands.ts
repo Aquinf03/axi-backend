@@ -8,6 +8,7 @@ export type CliKind =
   | "version"
   | "agent"
   | "ask"
+  | "runline"
   | "chat"
   | "doctor"
   | "spawn"
@@ -60,6 +61,17 @@ export const CLI_SPECS: CliSpec[] = [
     details: [
       "axi ask [dir] <prompt>   one-shot answer (no chat UI)",
       "axi ask --json [dir] <prompt>",
+    ],
+  },
+  {
+    kind: "runline",
+    tokens: ["runline"],
+    usage: 'axi runline [dir] "<prompt>"',
+    summary: "one chat turn or slash · no TTY UI",
+    details: [
+      'axi runline "<prompt>"   same as chat (tools + /slash), once, then exit',
+      'axi runline "/status"    slash commands work the same as in TTY chat',
+      "axi runline [dir] <prompt>",
     ],
   },
   {
@@ -150,10 +162,6 @@ export const CLI_SPECS: CliSpec[] = [
       "axi web --port 3001 set ~/.axi web_port + listen there",
       "axi web --detach    background Next, print URL",
       "axi web --no-open   start without opening a browser",
-      "/web · /web on      start (session-owned; stops when chat exits)",
-      "/web off            stop session-owned web UI",
-      "/web status         on/off · port · url",
-      "/web <port>         save web_port + start on that port",
     ],
   },
 ]
