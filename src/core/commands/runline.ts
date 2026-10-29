@@ -1,4 +1,4 @@
-/** `axi runline "<prompt>"` — one chat turn, no TTY UI. Same agent loop as normal chat. */
+/** `axi runline "<prompt>"` — one chat turn or slash, no TTY UI. Same path as normal chat. */
 
 import { existsSync, statSync } from "node:fs"
 import { stdout, stderr } from "node:process"
@@ -10,6 +10,8 @@ import { createChat, nameChat, saveChat } from "../session.js"
 import { beginTrajectoryTurn, closeTrajectoryTurn } from "../trajectory.js"
 import { renderMarkdown } from "../../ui/markdown.js"
 import { isTrain } from "../schema.js"
+import { isSlashLine, runSlashCli } from "./slash-cli.js"
+import { hasSessionOwnedWeb, holdSessionOwnedWeb, stopSessionOwnedWeb } from "./web.js"
 
 const USAGE = 'usage: axi runline [dir] "<prompt>"'
 
@@ -40,60 +42,119 @@ function parseRunline(argv: string[]): { workspace: string; prompt: string } {
   return { workspace, prompt }
 }
 
-export async function runline(argv: string[]): Promise<void> {
-  let workspace: string
-  let prompt: string
-  try {
-    ;({ workspace, prompt } = parseRunline(argv))
-  } catch (err) {
-    stderr.write(`${err instanceof Error ? err.message : String(err)}\n`)
-    process.exitCode = 1
-    return
-  }
-
-  const spec = createChat(workspace)
+async function runAgentOnce(opts: {
+  workspace: string
+  sessionId: string
+  prompt: string
+  history: ChatMsg[]
+}): Promise<{ reply: string; streamed: boolean }> {
   const tools: { name: string; args: string }[] = []
   const streamed = { value: false }
-  const host = createAskHost({ workspace, streamed }, tools)
+  const host = createAskHost({ workspace: opts.workspace, streamed }, tools)
 
-  const history: ChatMsg[] = withArlDigest([{ role: "user", content: prompt }], {
-    recentTexts: [prompt],
-  })
-  beginTrajectoryTurn({ sessionId: spec.id, userText: prompt })
+  const withDigest = withArlDigest(
+    [...opts.history, { role: "user" as const, content: opts.prompt }],
+    { recentTexts: [opts.prompt] },
+  )
+  opts.history.length = 0
+  opts.history.push(...withDigest)
 
-  setArlSessionId(spec.id)
+  beginTrajectoryTurn({ sessionId: opts.sessionId, userText: opts.prompt })
+  setArlSessionId(opts.sessionId)
   let reply = ""
   try {
-    const out = await runTurn(history, host)
+    const out = await runTurn(opts.history, host)
     reply = out.text
   } finally {
     setArlSessionId(undefined)
   }
 
-  history.push({ role: "assistant", content: reply })
+  opts.history.push({ role: "assistant", content: reply })
   try {
-    const flushed = await flushArlAfterTurn(history, spec.id)
+    const flushed = await flushArlAfterTurn(opts.history, opts.sessionId)
     if (flushed?.notice) stderr.write(`${flushed.notice}\n`)
-  } catch (err) {
-    stderr.write(`refine failed  ${err instanceof Error ? err.message : String(err)}\n`)
+  } catch (e) {
+    stderr.write(`refine failed  ${e instanceof Error ? e.message : String(e)}\n`)
   }
 
   try {
-    closeTrajectoryTurn({ sessionId: spec.id, assistantText: reply })
+    closeTrajectoryTurn({ sessionId: opts.sessionId, assistantText: reply })
   } catch {
-    /* trajectory optional */
+    /* optional */
   }
 
-  saveChat(workspace, spec, history)
+  return { reply, streamed: streamed.value }
+}
+
+export async function runline(argv: string[]): Promise<void> {
+  let workspace: string
+  let prompt: string
   try {
-    await nameChat(workspace, spec, prompt, reply, history)
-  } catch {
-    /* naming is best-effort */
-  }
-
-  if (streamed.value) {
-    if (!reply.endsWith("\n")) stdout.write("\n")
+    ;({ workspace, prompt } = parseRunline(argv))
+  } catch (e) {
+    stderr.write(`${e instanceof Error ? e.message : String(e)}\n`)
+    process.exitCode = 1
     return
   }
-  stdout.write(renderMarkdown(reply.trim(), undefined, { baseDir: workspace }) + "\n")
+
+  const spec = createChat(workspace)
+  const history: ChatMsg[] = []
+
+  try {
+    if (isSlashLine(prompt)) {
+      const { kick } = await runSlashCli(prompt, {
+        workspace,
+        sessionId: spec.id,
+        history,
+        spec,
+      })
+      if (kick) {
+        const { reply, streamed } = await runAgentOnce({
+          workspace,
+          sessionId: spec.id,
+          prompt: kick,
+          history,
+        })
+        saveChat(workspace, spec, history)
+        try {
+          await nameChat(workspace, spec, kick, reply, history)
+        } catch {
+          /* best-effort */
+        }
+        if (streamed) {
+          if (!reply.endsWith("\n")) stdout.write("\n")
+        } else {
+          stdout.write(renderMarkdown(reply.trim(), undefined, { baseDir: workspace }) + "\n")
+        }
+      } else {
+        saveChat(workspace, spec, history)
+      }
+    } else {
+      const { reply, streamed } = await runAgentOnce({
+        workspace,
+        sessionId: spec.id,
+        prompt,
+        history,
+      })
+      saveChat(workspace, spec, history)
+      try {
+        await nameChat(workspace, spec, prompt, reply, history)
+      } catch {
+        /* best-effort */
+      }
+      if (streamed) {
+        if (!reply.endsWith("\n")) stdout.write("\n")
+      } else {
+        stdout.write(renderMarkdown(reply.trim(), undefined, { baseDir: workspace }) + "\n")
+      }
+    }
+
+    // /web on keeps this process in the foreground until ctrl+c / ctrl+z (not detached).
+    if (hasSessionOwnedWeb()) {
+      await holdSessionOwnedWeb()
+    }
+  } catch (e) {
+    stopSessionOwnedWeb()
+    throw e
+  }
 }

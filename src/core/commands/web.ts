@@ -312,6 +312,46 @@ export function stopSessionOwnedWeb(): void {
   }
 }
 
+export function hasSessionOwnedWeb(): boolean {
+  return sessionOwned.size > 0
+}
+
+/**
+ * Keep the process alive while a session-owned web UI is running.
+ * Stops on SIGINT / SIGTERM (ctrl+c) or when Next exits.
+ * Does not touch SIGTSTP (ctrl+z) — leave default terminal suspend alone.
+ * Not a detach — foreground hold only.
+ */
+export function holdSessionOwnedWeb(): Promise<void> {
+  if (!sessionOwned.size) return Promise.resolve()
+  const url = [...sessionOwned.values()][0]
+  const tip = url ? ` · http://127.0.0.1:${url.port}` : ""
+  stderr.write(`web UI  holding${tip} · ctrl+c to stop\n`)
+
+  return new Promise((resolve) => {
+    let settled = false
+    const finish = () => {
+      if (settled) return
+      settled = true
+      process.off("SIGINT", onSignal)
+      process.off("SIGTERM", onSignal)
+      stopSessionOwnedWeb()
+      resolve()
+    }
+    const onSignal = () => {
+      stderr.write("\nweb UI  stopping…\n")
+      finish()
+    }
+    process.on("SIGINT", onSignal)
+    process.on("SIGTERM", onSignal)
+    for (const entry of sessionOwned.values()) {
+      entry.child.once("exit", () => {
+        if (!sessionOwned.size) finish()
+      })
+    }
+  })
+}
+
 function trackSession(child: ChildProcess, port: number): void {
   const pid = child.pid
   if (!pid) return
