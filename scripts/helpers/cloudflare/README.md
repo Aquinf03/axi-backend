@@ -1,67 +1,50 @@
-# axi releases (Cloudflare R2 + shared Worker)
+# axi releases (GitHub Releases)
 
-Same path as **aq**: packaged tarballs + install script live in the shared R2 bucket `releases`. The **aqfw-releases** Worker (in the `aq` repo) serves them. Apex `aquin.app` stays on Vercel and rewrites `/releases/*` to the Worker.
+Same path as **aq**: packaged tarballs + `install.sh` are published as GitHub Release assets on **Aquinf03/axi** (the workspace / frontend repo — not the `axi-backend` submodule alone).
+
+> Cloudflare R2 was retired for axi. The scripts under this folder are historical; use `scripts/helpers/release.sh`.
 
 ## Public URLs
 
 ```
-https://aquin.app/axi/download/install.sh     # Aquin static (public/axi/download/)
-https://aquin.app/releases/axi-latestv.tar.gz
-https://aquin.app/releases/axi-<version>v.tar.gz
+https://github.com/Aquinf03/axi/releases/latest/download/install.sh
+https://github.com/Aquinf03/axi/releases/latest/download/axi-vlatest.tar.gz
+https://github.com/Aquinf03/axi/releases/download/v<version>/axi-v<version>.tar.gz
 ```
 
-Worker origin (also serves install from R2):
-
-| Host | Notes |
-|------|--------|
-| `https://aqfw-releases.aquin-explore.workers.dev` | Always live |
-| `https://releases.aquin.app` | Preferred once DNS is set (see aq’s worker README) |
-
-## One-time setup
-
-1. **Worker** (aq repo) — already binds R2 `releases`. After pulling axi route updates:
-
-   ```bash
-   cd /path/to/aq/scripts/helpers/cloudflare/releases-worker
-   npm install
-   npx wrangler deploy
-   ```
-
-2. **Aquin** — ship the curl entrypoint as static (same pattern as aq):
-
-   ```bash
-   mkdir -p public/axi/download
-   cp /path/to/axi/install.sh public/axi/download/install.sh
-   ```
-
-   Optional: rewrite `/axi/download/install.sh` → Worker instead of static (not required if public/ is synced on release).
-
-3. **Wrangler** — `npm i -g wrangler && wrangler login` (same Cloudflare account as aq).
+`install.sh` lives at the **workspace root** (`Aquinf03/axi/install.sh`), not inside `axi-backend/`, so it can be attached as a release asset.
 
 ## Publish a release
 
-From the axi repo root:
+From the axi workspace (polyrepo with submodule checked out):
 
 ```bash
-chmod +x scripts/helpers/release.sh install.sh
-./scripts/helpers/release.sh latest
-./scripts/helpers/release.sh 0.0.2   # also refreshes axi-latestv.tar.gz
+# requires: gh auth login, push access to Aquinf03/axi
+chmod +x install.sh axi-backend/scripts/helpers/release.sh
+npm run release --prefix axi-backend -- 0.0.4
+# or: bash axi-backend/scripts/helpers/release.sh 0.0.4
 ```
 
-Then refresh Aquin’s static install script (and redeploy Vercel) so `curl …/axi/download/install.sh` matches the repo.
+This builds the backend package, packs `axi-v*.tar.gz` (includes `web/` when present), and uploads:
+
+- `install.sh`
+- `axi-v<version>.tar.gz`
+- `axi-vlatest.tar.gz`
+
+Override the GitHub repo with `AXI_GH_REPO=owner/name` if needed.
 
 ## Team install
 
 ```bash
-curl -fsSL https://aquin.app/axi/download/install.sh | bash
+curl -fsSL https://github.com/Aquinf03/axi/releases/latest/download/install.sh | bash
 ```
 
-Override tarball: `AXI_RELEASE_URL=https://aquin.app/releases/axi-0.0.2v.tar.gz bash`.
+Override tarball: `AXI_RELEASE_URL=https://github.com/Aquinf03/axi/releases/download/v0.0.4/axi-v0.0.4.tar.gz bash`.
 
-## R2 keys
+## From a checkout
 
-| Key | Content |
-|-----|---------|
-| `axi-latestv.tar.gz` | Current tarball |
-| `axi-<version>v.tar.gz` | Versioned tarball |
-| `axi/install.sh` | Install script (Worker path `/axi/download/install.sh`) |
+```bash
+git clone --recurse-submodules https://github.com/Aquinf03/axi.git
+cd axi
+./install.sh
+```

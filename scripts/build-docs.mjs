@@ -252,7 +252,7 @@ write(
 
   <h2>Quick start</h2>
   ${shellBlock("shell", [
-    "$ curl -fsSL https://aquin.app/axi/download/install.sh | bash",
+    "$ curl -fsSL https://github.com/Aquinf03/axi/releases/latest/download/install.sh | bash",
     "$ axi provider openai",
     "$ cd /path/to/project",
     "$ axi",
@@ -282,27 +282,27 @@ write(
   "documentation/install/index.html",
   page({
     title: "Install",
-    description: "Install axi via curl (Cloudflare R2) or from a checkout. Node ≥ 18. Optional aq for train tools.",
+    description: "Install axi via curl (GitHub Releases) or from a checkout. Node ≥ 18. Optional aq for train tools.",
     active: "install",
     depth: 2,
     body: `<h1>Install</h1>
-<p class="lead">Same publish path as aq: tarball on Cloudflare R2, install script on <code class="chip">aquin.app</code>. Needs Node ≥ 18. After install, run ${chip("axi doctor")}.</p>
+<p class="lead">Same publish path as aq: tarball + <code class="chip">install.sh</code> on GitHub Releases (<code class="chip">Aquinf03/axi</code>). Needs Node ≥ 18. After install, run ${chip("axi doctor")}.</p>
 <div class="prereq"><span class="prereq-label">Prerequisite</span>Node ≥ 18 · npm · curl · (optional) aq for train tools</div>
-${toolSection("curl", "curl … | bash", "Team install — downloads <code>axi-latestv.tar.gz</code> from <code>aquin.app/releases</code> and links <code>axi</code> under <code>~/.local</code>.", {
+${toolSection("curl", "curl … | bash", "Team install — downloads <code>axi-vlatest.tar.gz</code> from GitHub Releases and links <code>axi</code> under <code>~/.local</code>.", {
   examples: [
     {
       lines: [
-        "$ curl -fsSL https://aquin.app/axi/download/install.sh | bash",
+        "$ curl -fsSL https://github.com/Aquinf03/axi/releases/latest/download/install.sh | bash",
         "$ axi version",
         "$ axi doctor",
       ],
     },
   ],
 })}
-${toolSection("from-source", "npm i && npm link", "Install from an axi checkout (or <code>./install.sh</code> in the repo).", {
+${toolSection("from-source", "npm i && npm link", "Install from an axi workspace checkout (<code>./install.sh</code> at the repo root; clone with <code>--recurse-submodules</code>).", {
   examples: [
-    { lines: ["$ cd axi && npm i && npm link", "$ axi version", "$ axi doctor"] },
-    { lines: ["$ cd axi && ./install.sh"] },
+    { lines: ["$ git clone --recurse-submodules https://github.com/Aquinf03/axi.git", "$ cd axi && ./install.sh", "$ axi version", "$ axi doctor"] },
+    { lines: ["$ cd axi/axi-backend && npm i && npm link", "$ axi version"] },
   ],
 })}
 ${toolSection("provider", "axi provider <name>", "Save a provider key and select it. Names: openai · anthropic · grok · ollama.", {

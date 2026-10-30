@@ -1,25 +1,46 @@
 #!/usr/bin/env bash
-# Build an axi tarball and upload to Cloudflare R2 (shared `releases` bucket).
-# Requires: wrangler logged in (same account as aq). See scripts/helpers/cloudflare/README.md.
+# Build an axi tarball and publish to GitHub Releases (Aquinf03/axi).
+# Requires: gh authenticated (`gh auth login`), push access to the repo.
+#
+# Run from the axi workspace (polyrepo) so web/ + root install.sh are available:
+#   npm run release --prefix axi-backend -- 0.0.4
+#   # or:  bash axi-backend/scripts/helpers/release.sh 0.0.4
 set -euo pipefail
 
 PKG="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
-REPO="$(cd "$PKG/.." && pwd)"
-VERSION="${1:-latest}"
-BUCKET="${AQUIN_R2_BUCKET:-releases}"
+# Prefer the workspace root (parent of axi-backend) when this is a submodule checkout.
+if [ -f "$PKG/../install.sh" ] || [ -f "$PKG/../.axi_root" ] || [ -f "$PKG/../.gitmodules" ]; then
+  ROOT="$(cd "$PKG/.." && pwd)"
+else
+  ROOT="$PKG"
+fi
 
+VERSION="${1:?usage: release.sh <version>  e.g. 0.0.4}"
+REPO="${AXI_GH_REPO:-Aquinf03/axi}"
+TAG="v${VERSION}"
+INSTALL_SH="${AXI_INSTALL_SH:-$ROOT/install.sh}"
+
+# axi-v0.0.4.tar.gz · axi-vlatest.tar.gz  (v prefix, not suffix)
 release_object_name() {
-  echo "axi-${1}v.tar.gz"
+  echo "axi-v${1}.tar.gz"
 }
 
-command -v wrangler >/dev/null || {
-  echo "wrangler CLI required: npm i -g wrangler && wrangler login" >&2
+command -v gh >/dev/null || {
+  echo "gh CLI required: https://cli.github.com/ — then gh auth login" >&2
   exit 1
 }
 
+if [ ! -f "$INSTALL_SH" ]; then
+  echo "install.sh not found at $INSTALL_SH" >&2
+  echo "Expected at the axi workspace root (not inside axi-backend)." >&2
+  exit 1
+fi
+
 TMP="$(mktemp -d)"
 STAGE="$TMP/stage"
-ARCHIVE="$TMP/$(release_object_name "$VERSION")"
+VERSIONED="$TMP/$(release_object_name "$VERSION")"
+LATEST="$TMP/$(release_object_name latest)"
+INSTALL_COPY="$TMP/install.sh"
 trap 'rm -rf "$TMP"' EXIT
 
 echo "Building axi ..."
@@ -33,13 +54,10 @@ cp "$PKG/package-lock.json" "$STAGE/axi/"
 cp -R "$PKG/bin" "$PKG/dist" "$PKG/assets" "$STAGE/axi/"
 # scripts/ is listed in package files (job-wait helpers etc.)
 cp -R "$PKG/scripts" "$STAGE/axi/"
-# TTY UI lives at repo-root src/ui — ship it next to dist for runtime imports from compiled tree.
-# (Compiled output already includes dist/ui from the BACKEND/src/ui symlink at build time.)
 # browser UI (axi web / /web) — source only; first run npm installs deps
-if [ -d "$REPO/web" ]; then
+if [ -d "$ROOT/web" ]; then
   mkdir -p "$STAGE/axi/web"
-  # copy without node_modules / .next
-  tar -C "$REPO/web" \
+  tar -C "$ROOT/web" \
     --exclude=node_modules \
     --exclude=.next \
     --exclude='web/.next' \
@@ -47,36 +65,42 @@ if [ -d "$REPO/web" ]; then
 fi
 # Drop local eval workdirs / huge fixtures from the published tree
 rm -rf "$STAGE/axi/scripts/tests/.work" 2>/dev/null || true
-cp "$PKG/install.sh" "$REPO/README.md" "$REPO/LICENSE" "$STAGE/"
-cp "$REPO/README.md" "$REPO/LICENSE" "$STAGE/axi/" 2>/dev/null || true
+
+cp "$INSTALL_SH" "$ROOT/README.md" "$ROOT/LICENSE" "$STAGE/" 2>/dev/null || {
+  cp "$INSTALL_SH" "$STAGE/"
+  cp "$PKG/README.md" "$STAGE/README.md" 2>/dev/null || true
+  cp "$ROOT/LICENSE" "$STAGE/LICENSE" 2>/dev/null || cp "$PKG/LICENSE" "$STAGE/LICENSE" 2>/dev/null || true
+}
+cp "$ROOT/README.md" "$ROOT/LICENSE" "$STAGE/axi/" 2>/dev/null || true
 
 echo "Packing tarball ..."
-tar czf "$ARCHIVE" -C "$STAGE" axi install.sh README.md LICENSE
+tar czf "$VERSIONED" -C "$STAGE" axi install.sh README.md LICENSE
+cp "$VERSIONED" "$LATEST"
+cp "$INSTALL_SH" "$INSTALL_COPY"
 
-REMOTE="$(release_object_name "$VERSION")"
-echo "Uploading r2://${BUCKET}/${REMOTE} (remote) ..."
-wrangler r2 object put "${BUCKET}/${REMOTE}" --file="$ARCHIVE" --content-type application/gzip --remote
+NOTES="axi ${VERSION}"
+if [ -f "$ROOT/CHANGELOG.md" ]; then
+  NOTES="axi ${VERSION}
 
-echo "Uploading install script ..."
-wrangler r2 object put "${BUCKET}/axi/install.sh" \
-  --file="$PKG/install.sh" \
-  --content-type "text/x-shellscript; charset=utf-8" \
-  --remote
+See CHANGELOG.md in the repository for details."
+fi
 
-if [ "$VERSION" != "latest" ]; then
-  LATEST="$(release_object_name latest)"
-  echo "Updating ${LATEST} alias ..."
-  wrangler r2 object put "${BUCKET}/${LATEST}" --file="$ARCHIVE" --content-type application/gzip --remote
+if gh release view "$TAG" --repo "$REPO" >/dev/null 2>&1; then
+  echo "Updating existing release ${TAG} ..."
+  gh release upload "$TAG" "$VERSIONED" "$LATEST" "$INSTALL_COPY" \
+    --repo "$REPO" --clobber
+else
+  echo "Creating release ${TAG} ..."
+  gh release create "$TAG" "$VERSIONED" "$LATEST" "$INSTALL_COPY" \
+    --repo "$REPO" \
+    --title "axi ${VERSION}" \
+    --notes "$NOTES" \
+    --latest
 fi
 
 echo ""
 echo "Published:"
-echo "  R2:  ${BUCKET}/${REMOTE}"
-echo "  URL: https://aquin.app/releases/${REMOTE}"
-if [ "$VERSION" != "latest" ]; then
-  echo "  URL: https://aquin.app/releases/$(release_object_name latest)"
-fi
-echo "  Install: curl -fsSL https://aquin.app/axi/download/install.sh | bash"
-echo ""
-echo "Also copy install.sh → Aquin public/axi/download/install.sh and redeploy the site"
-echo "(static curl URL). Redeploy aqfw-releases worker if routes were updated."
+echo "  https://github.com/${REPO}/releases/tag/${TAG}"
+echo "  https://github.com/${REPO}/releases/latest/download/install.sh"
+echo "  https://github.com/${REPO}/releases/latest/download/$(release_object_name latest)"
+echo "  https://github.com/${REPO}/releases/download/${TAG}/$(release_object_name "$VERSION")"

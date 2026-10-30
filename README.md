@@ -18,10 +18,10 @@ Good first contributions: docs under `docs/documentation/` (regen with `npm run 
 ## Install
 
 ```bash
-curl -fsSL https://aquin.app/axi/download/install.sh | bash
+curl -fsSL https://github.com/Aquinf03/axi/releases/latest/download/install.sh | bash
 ```
 
-From a checkout: `cd BACKEND && npm i && npm link` or `./BACKEND/install.sh`. Publish path matches **aq** (Cloudflare R2 + shared Worker) — see [`BACKEND/scripts/helpers/cloudflare/README.md`](./BACKEND/scripts/helpers/cloudflare/README.md).
+`install.sh` lives at the **axi workspace root** (this package is the `axi-backend` submodule). From a polyrepo checkout: `./install.sh` or `npm i && npm link` inside this directory. Publish path matches **aq** (GitHub Releases) — see [`scripts/helpers/cloudflare/README.md`](./scripts/helpers/cloudflare/README.md).
 
 Needs **Node ≥ 18**. Talks to `aq` via:
 
