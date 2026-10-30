@@ -41,7 +41,24 @@ if (!historyIn?.length) fail("history must be a non-empty array")
 
 const history = historyIn
   .filter((m) => m && (m.role === "user" || m.role === "assistant") && typeof m.content === "string")
-  .map((m) => ({ role: m.role, content: m.content }))
+  .map((m) => {
+    const images = Array.isArray(m.images)
+      ? m.images
+          .filter(
+            (img) =>
+              img &&
+              typeof img.path === "string" &&
+              typeof img.mime === "string" &&
+              typeof img.data === "string",
+          )
+          .map((img) => ({ path: img.path, mime: img.mime, data: img.data }))
+      : undefined
+    return {
+      role: m.role,
+      content: m.content,
+      ...(images?.length ? { images } : {}),
+    }
+  })
 
 if (!history.length || history[history.length - 1]?.role !== "user") {
   fail("history must end with a user message")
@@ -138,8 +155,8 @@ emit({ type: "status", phase: "thinking" })
 
 const host = {
   ...base,
-  onDelta: () => {
-    /* final text returned on done; avoid flooding the timeline */
+  onDelta: (chunk) => {
+    if (typeof chunk === "string" && chunk) emit({ type: "delta", text: chunk })
   },
   onToolStart: (name, args) => {
     tools.push({ name, args: args ?? "" })

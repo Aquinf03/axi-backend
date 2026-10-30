@@ -28,12 +28,15 @@ import {
   approvePendingConfig,
   configGateStatusText,
   denyPendingConfig,
+  formatConfigReload,
   pendingConfigStatusText,
   proposeConfigWrite,
   resolveConfig,
   setConfigGate,
   setPermissionModeWorkspace,
 } from "../core/config.js"
+import { getWebPort } from "../core/commands/web.js"
+import { hasAquinLogin } from "./aquin-auth.js"
 import {
   arlModeStatusText,
   countArlEntries,
@@ -1048,6 +1051,21 @@ export function runSlash(line: string, opts: SlashOpts = {}): SlashResult {
     if (head === "status" || !tokens[0]) {
       return { text: `${configGateStatusText()}\n${pendingConfigStatusText()}` }
     }
+    if (head === "reload" || head === "refresh") {
+      // Re-read every on-disk layer and dump the live effective board.
+      load()
+      return {
+        text: formatConfigReload(workspace, {
+          provider: activeId() ? activeLabel() : "none",
+          sound: soundEnabled(),
+          notify: notifyEnabled(),
+          temperature: temperatureLabel(),
+          webPort: getWebPort(),
+          aquinLogin: hasAquinLogin(),
+          extras: [arlModeStatusText()],
+        }),
+      }
+    }
     if (head === "gate") {
       const sub = (tokens[1] ?? "status").toLowerCase()
       if (sub === "status" || !tokens[1]) return { text: configGateStatusText() }
@@ -1063,7 +1081,7 @@ export function runSlash(line: string, opts: SlashOpts = {}): SlashResult {
     if (head === "deny" || head === "no" || head === "reject") {
       return { text: denyPendingConfig().text }
     }
-    return { text: "usage: /config status|gate on|off|approve|deny" }
+    return { text: "usage: /config status|reload|gate on|off|approve|deny" }
   }
   if (cmd === "/steer") {
     return runSteerSlash(opts.sessionId, arg)
@@ -1315,16 +1333,17 @@ async function* sseLines(res: Response): AsyncGenerator<string> {
 }
 
 /**
- * Stream OpenAI-compat SSE via node:http — undici's global fetch applies
+ * Stream HTTP JSON line responses via node:http — undici's global fetch applies
  * headersTimeout/bodyTimeout that abort slow local model streams mid-read
  * with "The operation was aborted due to timeout" even while tokens arrive.
  */
-function streamOpenAiCompatSse(
+function streamHttpLines(
   endpoint: string,
   body: unknown,
   headers: Record<string, string>,
   signal: AbortSignal | undefined,
   onLine: (line: string) => void,
+  accept = "text/event-stream",
 ): Promise<{ status: number; errorText: string }> {
   return new Promise((resolve, reject) => {
     let settled = false
@@ -1353,7 +1372,7 @@ function streamOpenAiCompatSse(
           ...headers,
           "content-type": "application/json",
           "content-length": String(payload.length),
-          accept: "text/event-stream",
+          accept,
         },
         // Local models can sit on prefill for a long time; never idle-kill the socket.
         timeout: 0,
@@ -1424,6 +1443,47 @@ function streamOpenAiCompatSse(
     req.write(payload)
     req.end()
   })
+}
+
+/** OpenAI-compat SSE (`data: …`). */
+function streamOpenAiCompatSse(
+  endpoint: string,
+  body: unknown,
+  headers: Record<string, string>,
+  signal: AbortSignal | undefined,
+  onLine: (line: string) => void,
+): Promise<{ status: number; errorText: string }> {
+  return streamHttpLines(endpoint, body, headers, signal, onLine, "text/event-stream")
+}
+
+/** Strip trailing `/v1` from catalog base so we can hit native Ollama routes. */
+function ollamaRoot(base: string): string {
+  return base.replace(/\/$/, "").replace(/\/v1$/i, "")
+}
+
+/** Native Ollama `/api/chat` messages (images as raw base64, not data URLs). */
+function ollamaMessages(system: string, history: ChatMsg[]): Record<string, unknown>[] {
+  const out: Record<string, unknown>[] = [{ role: "system", content: system }]
+  for (const m of history) {
+    if (m.role === "tool") {
+      out.push({ role: "user", content: m.content })
+      continue
+    }
+    if (m.role === "assistant" && m.tool_calls?.length) {
+      out.push({ role: "assistant", content: m.content || "" })
+      continue
+    }
+    if (m.role === "user" && m.images?.length) {
+      out.push({
+        role: "user",
+        content: m.content || "",
+        images: m.images.map((img) => img.data),
+      })
+      continue
+    }
+    out.push({ role: m.role, content: m.content })
+  }
+  return out
 }
 
 function openaiDelta(line: string): string | null {
@@ -1662,8 +1722,7 @@ function nativeWebSearch(id: ProviderId): boolean {
 }
 
 function clientTools(id: ProviderId, tools: AgentToolJson[]): AgentToolJson[] {
-  // Ollama's OpenAI-compat endpoint hangs (0 bytes → AbortSignal timeout) when tool
-  // schemas are attached. Chat-only until that path is solid.
+  // Native Ollama `/api/chat` path is chat-only for now (no tool_calls round-trip).
   if (id === "ollama") return []
   if (!nativeWebSearch(id)) return tools
   return tools.filter((t) => t.name !== "web_search")
@@ -1937,46 +1996,63 @@ export async function streamTurn(
     )
   }
 
-  // Ollama: chat-only over node:http SSE. Global fetch (undici) aborts slow local
-  // streams via headersTimeout/bodyTimeout → "operation was aborted due to timeout"
-  // while the model is still producing tokens the UI never sees.
+  // Ollama: native `/api/chat` NDJSON over node:http.
+  // OpenAI-compat `/v1/chat/completions` is dramatically slower with axi's system
+  // prompt (tens of seconds TTFT vs <1s on native) — do not use it for inference.
   let text = ""
   let usage: TokenUsageOut | undefined
+  const temp = temperatureBody()
   const handleLine = (line: string) => {
-    if (!line.startsWith("data:")) return
-    const raw = line.slice(5).trim()
-    if (!raw || raw === "[DONE]") return
+    const raw = line.trim()
+    if (!raw) return
     let j: {
-      choices?: { delta?: { content?: string | null } }[]
-      usage?: unknown
-      error?: { message?: string }
+      message?: { content?: string | null }
+      done?: boolean
+      prompt_eval_count?: number
+      eval_count?: number
+      error?: string
     }
     try {
       j = JSON.parse(raw) as typeof j
     } catch {
       return
     }
-    if (j.error?.message) throw new Error(j.error.message)
-    const chunk = j.choices?.[0]?.delta?.content
+    if (typeof j.error === "string" && j.error) throw new Error(j.error)
+    const chunk = j.message?.content
     if (chunk) {
       text += chunk
       onDelta(chunk)
     }
-    if (j.usage) usage = parseProviderUsage(j.usage) ?? usage
+    if (j.done) {
+      const input = typeof j.prompt_eval_count === "number" ? j.prompt_eval_count : 0
+      const output = typeof j.eval_count === "number" ? j.eval_count : 0
+      if (input > 0 || output > 0) {
+        usage = {
+          input,
+          output,
+          cachedInput: 0,
+          cacheWrite: 0,
+          calls: 1,
+        }
+      }
+    }
   }
   let result: { status: number; errorText: string }
   try {
-    result = await streamOpenAiCompatSse(
-      `${base}/chat/completions`,
+    result = await streamHttpLines(
+      `${ollamaRoot(base)}/api/chat`,
       {
         model,
         stream: true,
-        messages: openaiMessages(system, hist),
-        ...temperatureBody(),
+        messages: ollamaMessages(system, hist),
+        // Keep the weights resident — cold-load of a 14B model is ~15s+.
+        keep_alive: "30m",
+        ...(typeof temp.temperature === "number" ? { options: { temperature: temp.temperature } } : {}),
       },
-      { authorization: `Bearer ${key}` },
+      {},
       opts.signal,
       handleLine,
+      "application/x-ndjson",
     )
   } catch (err) {
     // Keep whatever tokens we already forwarded to the UI.
@@ -1986,8 +2062,8 @@ export async function streamTurn(
   if (result.status < 200 || result.status >= 300) {
     let msg = `${id} ${result.status}`
     try {
-      const body = JSON.parse(result.errorText) as { error?: { message?: string } }
-      if (body.error?.message) msg = body.error.message
+      const body = JSON.parse(result.errorText) as { error?: string }
+      if (typeof body.error === "string" && body.error) msg = body.error
     } catch {
       if (result.errorText.trim()) msg = result.errorText.trim().slice(0, 400)
     }

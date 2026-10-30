@@ -195,7 +195,7 @@ export const SLASH_SPECS: SlashSpec[] = [
   { name: "/mode", hint: "ask · auto · plan · full-access (permission mode)" },
   {
     name: "/config",
-    hint: "dry-run setup writes · status|approve|deny · gate on|off",
+    hint: "reload · status|approve|deny · gate on|off",
   },
   {
     name: "/steer",

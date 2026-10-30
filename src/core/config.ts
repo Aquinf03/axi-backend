@@ -41,6 +41,10 @@ export {
 export { atomicWriteText, backupIfExists, configBackupsDir } from "./config/atomic.js"
 export { resolveConfig, type ResolvedRuntime } from "./config/resolve.js"
 export {
+  formatConfigReload,
+  type ConfigReloadBits,
+} from "./config/reload.js"
+export {
   PROJECT_SAFE_KEYS,
   type ConfigSource,
   type ProfileConfig,

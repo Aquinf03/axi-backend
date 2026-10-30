@@ -1,9 +1,15 @@
 #!/usr/bin/env node
 /**
- * Local bridge for web/ — stdin JSON → runSlashCli → JSON result.
+ * Local bridge for web/ — stdin JSON → runSlashCli / resolveInteractive → JSON result.
  *
- * stdin:  { line: string, workspace?: string, sessionId?: string, history?: {role,content}[] }
- * stdout: { ok:true, text, kick? } | { ok:false, error }
+ * stdin:  {
+ *   line?: string,
+ *   resolve?: { kind, optionId?, input?, context?, query? },
+ *   workspace?: string,
+ *   sessionId?: string,
+ *   history?: {role,content}[]
+ * }
+ * stdout: { ok:true, text, kick?, interactive?, action? } | { ok:false, error }
  */
 import { readFileSync, existsSync } from "node:fs"
 import path from "node:path"
@@ -36,8 +42,10 @@ try {
 }
 
 const line = typeof body.line === "string" ? body.line.trim() : ""
-if (!line || !line.startsWith("/") || line === "/") {
-  fail("line must be a slash command (e.g. /status)")
+const resolve = body.resolve && typeof body.resolve === "object" ? body.resolve : null
+
+if (!resolve && (!line || !line.startsWith("/") || line === "/")) {
+  fail("line must be a slash command (e.g. /status) or pass resolve")
 }
 
 const workspace = path.resolve(
@@ -59,9 +67,13 @@ const history = historyIn
 const slashCli = await import(pathToFileURL(path.join(dist, "core/commands/slash-cli.js")).href)
 
 const now = new Date().toISOString()
+const chatName =
+  typeof body.chatName === "string" && body.chatName.trim()
+    ? body.chatName.trim().slice(0, 80)
+    : "new chat"
 const spec = {
   id: sessionId,
-  name: "web",
+  name: chatName,
   created: now,
   updated: now,
   workspace_root: workspace,
@@ -69,16 +81,37 @@ const spec = {
 }
 
 try {
-  const result = await slashCli.runSlashCli(line, {
-    workspace,
-    sessionId,
-    history,
-    spec,
-  })
+  const result = resolve
+    ? await slashCli.resolveInteractive(
+        {
+          kind: String(resolve.kind || ""),
+          optionId: typeof resolve.optionId === "string" ? resolve.optionId : undefined,
+          input: typeof resolve.input === "string" ? resolve.input : undefined,
+          query: typeof resolve.query === "string" ? resolve.query : undefined,
+          context:
+            resolve.context && typeof resolve.context === "object"
+              ? Object.fromEntries(
+                  Object.entries(resolve.context).filter(([, v]) => typeof v === "string"),
+                )
+              : undefined,
+        },
+        { workspace, sessionId, history, spec },
+      )
+    : await slashCli.runSlashCli(line, {
+        workspace,
+        sessionId,
+        history,
+        spec,
+      })
+  const text = (result.text ?? "").trim()
   emit({
     ok: true,
-    text: (result.text ?? "").trim() || "(ok)",
+    text:
+      text ||
+      (result.interactive || result.action || resolve ? "" : "(ok)"),
     kick: typeof result.kick === "string" ? result.kick : undefined,
+    interactive: result.interactive ?? undefined,
+    action: result.action ?? undefined,
     workspace,
   })
 } catch (err) {
