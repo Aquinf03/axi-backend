@@ -312,6 +312,82 @@ export function stopSessionOwnedWeb(): void {
   }
 }
 
+/** PIDs listening on TCP `port` (best-effort; empty if we cannot probe). */
+export function findListenPids(port: number): number[] {
+  const n = Math.floor(port)
+  if (!Number.isFinite(n) || n <= 0) return []
+  const found = new Set<number>()
+  const take = (raw: string | null | undefined) => {
+    if (!raw) return
+    for (const m of raw.matchAll(/\b(\d{2,})\b/g)) {
+      const pid = Number(m[1])
+      if (Number.isFinite(pid) && pid > 0 && pid !== process.pid) found.add(pid)
+    }
+  }
+  if (process.platform === "win32") {
+    const r = spawnSync("netstat", ["-ano", "-p", "TCP"], {
+      encoding: "utf8",
+      windowsHide: true,
+    })
+    if (r.status === 0 && r.stdout) {
+      const re = new RegExp(`(?:0\\.0\\.0\\.0|127\\.0\\.0\\.1|\\[::\\]|\\[::1\\]):${n}\\s+.*?LISTENING\\s+(\\d+)`, "gi")
+      for (const m of r.stdout.matchAll(re)) {
+        const pid = Number(m[1])
+        if (Number.isFinite(pid) && pid > 0 && pid !== process.pid) found.add(pid)
+      }
+    }
+    return [...found]
+  }
+  const lsof = spawnSync("lsof", ["-nP", `-iTCP:${n}`, "-sTCP:LISTEN", "-t"], {
+    encoding: "utf8",
+  })
+  if (lsof.status === 0) take(lsof.stdout)
+  if (!found.size) {
+    const fuser = spawnSync("fuser", [`${n}/tcp`], { encoding: "utf8" })
+    // fuser prints pids on stderr
+    take(fuser.stdout)
+    take(fuser.stderr)
+  }
+  if (!found.size) {
+    const ss = spawnSync("ss", ["-ltnp", `sport = :${n}`], { encoding: "utf8" })
+    if (ss.status === 0 && ss.stdout) {
+      for (const m of ss.stdout.matchAll(/pid=(\d+)/g)) {
+        const pid = Number(m[1])
+        if (Number.isFinite(pid) && pid > 0 && pid !== process.pid) found.add(pid)
+      }
+    }
+  }
+  return [...found]
+}
+
+/** Kill whatever is listening on `port` (session-owned or external). */
+export function killListenersOnPort(port: number): number[] {
+  const pids = findListenPids(port)
+  for (const pid of pids) killWebProcess(pid)
+  return pids
+}
+
+/**
+ * Stop the web UI no matter how it was started — session-owned, detached, or
+ * already-running external Next. Used by TTY `/web off`.
+ */
+export async function forceStopWeb(port?: number): Promise<WebRuntimeStatus> {
+  const target =
+    port && port > 0
+      ? Math.floor(port)
+      : webRuntimeStatus().port || getWebPort()
+  stopSessionOwnedWeb()
+  killListenersOnPort(target)
+  const deadline = Date.now() + 3_500
+  while (Date.now() < deadline) {
+    if (await portFree(target)) break
+    // Next workers can linger — hit listeners again mid-wait
+    killListenersOnPort(target)
+    await new Promise((r) => setTimeout(r, 150))
+  }
+  return webRuntimeStatusAsync()
+}
+
 export function hasSessionOwnedWeb(): boolean {
   return sessionOwned.size > 0
 }
