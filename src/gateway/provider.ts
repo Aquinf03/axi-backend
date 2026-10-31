@@ -88,8 +88,9 @@ type Saved = { key?: string; base?: string; model?: string }
 
 type Config = {
   active?: ProviderId
+  /** Click / message cues. Omitted → off. */
   sound?: boolean
-  /** Desktop / terminal notify when a reply finishes. Omitted → on. */
+  /** Desktop / terminal notify when a reply finishes. Omitted → off. */
   notify?: boolean
   /** Sampling temperature for agent turns. Omitted → provider default. */
   temperature?: number
@@ -201,15 +202,15 @@ export function contextWindow(): number {
 
 export function soundEnabled(): boolean {
   if (process.env.AQ_QUIET === "1") return false
-  return load().sound !== false
+  return load().sound === true
 }
 
 export function toggleSound(): boolean {
   const cfg = load()
-  cfg.sound = cfg.sound === false
-  withSave(cfg, cfg.sound !== false ? "sound on" : "sound off")
+  cfg.sound = cfg.sound !== true
+  withSave(cfg, cfg.sound ? "sound on" : "sound off")
   // When staged, disk still has old value — report intended state.
-  return cfg.sound !== false
+  return cfg.sound === true
 }
 
 export function setSound(on: boolean): string {
@@ -220,14 +221,14 @@ export function setSound(on: boolean): string {
 
 export function notifyEnabled(): boolean {
   if (process.env.AQ_QUIET === "1") return false
-  return load().notify !== false
+  return load().notify === true
 }
 
 export function toggleNotify(): boolean {
   const cfg = load()
-  cfg.notify = cfg.notify === false
-  withSave(cfg, cfg.notify !== false ? "notify on" : "notify off")
-  return cfg.notify !== false
+  cfg.notify = cfg.notify !== true
+  withSave(cfg, cfg.notify ? "notify on" : "notify off")
+  return cfg.notify === true
 }
 
 export function setNotify(on: boolean): string {
