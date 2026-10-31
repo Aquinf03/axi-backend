@@ -1,10 +1,17 @@
 #!/usr/bin/env node
 /** Cross-platform post-tsc step — copy non-TS assets beside dist. */
-import { copyFileSync, mkdirSync, readdirSync } from "node:fs"
+import { copyFileSync, chmodSync, mkdirSync, readdirSync, writeFileSync } from "node:fs"
 import path from "node:path"
 import { fileURLToPath } from "node:url"
 
 const root = path.join(path.dirname(fileURLToPath(import.meta.url)), "..")
+
+// Portable CLI shim — always rewrite so a host-absolute node path never ships.
+const binDir = path.join(root, "bin")
+mkdirSync(binDir, { recursive: true })
+const launcher = path.join(binDir, "axi")
+writeFileSync(launcher, '#!/usr/bin/env node\nimport "../dist/cli.js"\n')
+chmodSync(launcher, 0o755)
 
 const jobDir = path.join(root, "dist", "core", "job")
 mkdirSync(jobDir, { recursive: true })

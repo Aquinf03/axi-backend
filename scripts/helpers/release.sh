@@ -51,7 +51,11 @@ mkdir -p "$STAGE/axi"
 # Runtime package surface (matches package.json "files" + lock for reproducible npm install)
 cp "$PKG/package.json" "$STAGE/axi/"
 cp "$PKG/package-lock.json" "$STAGE/axi/"
-cp -R "$PKG/bin" "$PKG/dist" "$PKG/assets" "$STAGE/axi/"
+mkdir -p "$STAGE/axi/bin"
+# Portable launcher only — never ship a local absolute node / dist path.
+printf '%s\n' '#!/usr/bin/env node' 'import "../dist/cli.js"' >"$STAGE/axi/bin/axi"
+chmod +x "$STAGE/axi/bin/axi"
+cp -R "$PKG/dist" "$PKG/assets" "$STAGE/axi/"
 # scripts/ is listed in package files (job-wait helpers etc.)
 cp -R "$PKG/scripts" "$STAGE/axi/"
 # browser UI (axi web / /web) — source only; first run npm installs deps
@@ -65,6 +69,13 @@ if [ -d "$ROOT/web" ]; then
 fi
 # Drop local eval workdirs / huge fixtures from the published tree
 rm -rf "$STAGE/axi/scripts/tests/.work" 2>/dev/null || true
+
+# Hard fail if anything personal / host-absolute slipped into the package bin.
+if grep -E '/home/|cursor-agent|\\\\Users\\\\' "$STAGE/axi/bin/axi" >/dev/null 2>&1; then
+  echo "refusing to release: axi/bin/axi contains a host-specific path" >&2
+  cat "$STAGE/axi/bin/axi" >&2
+  exit 1
+fi
 
 cp "$INSTALL_SH" "$ROOT/README.md" "$ROOT/LICENSE" "$STAGE/" 2>/dev/null || {
   cp "$INSTALL_SH" "$STAGE/"
